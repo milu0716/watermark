@@ -44,11 +44,12 @@ flutter {
     source = "../.."
 }
 dependencies {
-    // 1. 強制載入 libs 資料夾內的所有檔案
-    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar", "*.aar"))))
+    // ... 其他依賴保持不變 ...
+
+    // 👇👇👇 加入這行！強制 App 直接依賴我們的偽裝包 👇👇👇
+    implementation("com.arthenica:ffmpeg-kit-https:6.0-2.LTS@aar")
     
-    // 2. 再次明確指定 (確保萬無一失)
-    implementation(files("libs/ffmpeg-kit-full-gpl-6.0-2.LTS.aar"))
-    implementation(files("libs/smart-exception-java-0.2.1.jar"))
-    implementation(files("libs/smart-exception-common-0.2.1.jar"))
+    // 順便把這兩個小幫手也加進去，確保不缺件
+    implementation("com.arthenica:smart-exception-java:0.2.1")
+    implementation("com.arthenica:smart-exception-common:0.2.1")
 }

@@ -30,15 +30,22 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  image_picker: ^1.0.4 # 圖片選擇
+  image_picker: ^1.0.7 # 圖片選擇
   path_provider: ^2.1.1 # 獲取儲存路徑
   image: ^4.1.3 # 圖片處理和儲存 (關鍵！用於處理圖像數據)
-  permission_handler: ^11.1.0 # (可選) 處理 Android/iOS 儲存權限
+  permission_handler: ^11.3.0 # (可選) 處理 Android/iOS 儲存權限
     # The following adds the Cupertino Icons font to your application.
     # Use with the CupertinoIcons class for iOS style icons.
+  video_player: ^2.7.2 # 影片播放器 (預覽用)
+  # FFmpeg (影片加浮水印核心)
+  # ✅ 改用社群修復版 (解決 Registrar 錯誤)
+  ffmpeg_kit_flutter:
+    git:
+      url: https://github.com/Carapacik/ffmpeg-kit.git
+      path: flutter/flutter
   cupertino_icons: ^1.0.8
   gal: ^2.3.2
-
+  
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -61,6 +68,8 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+  assets:
+    - assets/NotoSansTC-Regular.ttf
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg

@@ -3,7 +3,13 @@ allprojects {
         
         google()
         mavenCentral()
-        
+        maven {
+            url = uri(File(rootDir, "local_repo"))
+            metadataSources {
+                mavenPom()
+                artifact()
+            }
+        }
     }
 }
 val newBuildDir: Directory =

@@ -43,3 +43,10 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+# Android 額外的 build 檔案
+android/build/
+.gradle/
+
+# 避免 Windows 縮圖檔
+Thumbs.db
+ehthumbs.db
