@@ -45,6 +45,7 @@ dependencies:
       path: flutter/flutter
   cupertino_icons: ^1.0.8
   gal: ^2.3.2
+  http: ^1.6.0
   
 dev_dependencies:
   flutter_test:

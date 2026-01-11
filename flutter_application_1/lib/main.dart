@@ -1,4 +1,5 @@
-import 'dart:io';
+﻿import 'dart:io';
+import 'dart:convert'; // 新增: 用於 JSON 解析
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,6 +11,8 @@ import 'package:video_player/video_player.dart';
 import 'package:ffmpeg_kit_flutter/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter/return_code.dart';
 import 'package:gal/gal.dart';
+import 'api_service.dart';
+import 'package:http/http.dart' as http;
 
 void main() {
   runApp(const WatermarkApp());
@@ -40,7 +43,7 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateMixin {
-  final List<String> _tabs = ["Create", "Verify"];
+  final List<String> _tabs = ["製作 (Create)", "驗證 (Verify)"];
   late TabController _tabController;
 
   @override
@@ -53,7 +56,7 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Watermark Studio", style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text("隱形浮水印系統", style: TextStyle(fontWeight: FontWeight.bold)),
         bottom: TabBar(
           controller: _tabController,
           tabs: _tabs.map((t) => Tab(text: t)).toList(),
@@ -73,7 +76,7 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
 }
 
 // =============================================================================
-// 分頁 1: 製作浮水印 (完整功能版)
+// 分頁 1: 製作浮水印 (改為呼叫後端 API)
 // =============================================================================
 class WatermarkCreatePage extends StatefulWidget {
   const WatermarkCreatePage({super.key});
@@ -87,7 +90,8 @@ class _WatermarkCreatePageState extends State<WatermarkCreatePage> with Automati
   VideoPlayerController? _videoController;
   bool _isLoading = false;
   
-  final TextEditingController _watermarkController = TextEditingController(text: "Demo Watermark");
+  // 這裡的文字將被轉換成二進位隱藏在圖片頻率中
+  final TextEditingController _watermarkController = TextEditingController(text: "User123");
   final ImagePicker _picker = ImagePicker();
 
   @override
@@ -100,79 +104,40 @@ class _WatermarkCreatePageState extends State<WatermarkCreatePage> with Automati
     super.dispose();
   }
 
-  // 準備字型檔 (給 FFmpeg 用)
-  Future<String?> _getFontPath() async {
-    try {
-      // ⚠️ 確保 assets/Arial.ttf 存在
-      const String fontName = "NotoSansTC-Regular.ttf"; 
-      final Directory dir = await getTemporaryDirectory();
-      final String path = "${dir.path}/$fontName";
-      final File file = File(path);
-
-      if (!await file.exists()) {
-        final ByteData data = await rootBundle.load("assets/$fontName");
-        final List<int> bytes = data.buffer.asUint8List();
-        await file.writeAsBytes(bytes);
-      }
-      return path;
-    } catch (e) {
-      debugPrint("Font Load Error: $e");
-      return null; 
-    }
-  }
-
-  // 處理媒體 (FFmpeg + Gal)
-  Future<void> _processMedia() async {
+  // 修改重點 1: 改用 API 上傳，而非本地 FFmpeg
+  // 修改後：使用 ApiService
+  Future<void> _processMediaApi() async {
     if (_selectedFile == null) return;
     FocusScope.of(context).unfocus();
     setState(() => _isLoading = true);
 
     try {
-      final String text = _watermarkController.text;
-      final String? fontPath = await _getFontPath();
-      
-      final Directory tempDir = await getTemporaryDirectory();
-      final String ext = _isVideo ? "mp4" : "jpg";
-      final String outputPath = "${tempDir.path}/output_${DateTime.now().millisecondsSinceEpoch}.$ext";
+      // 直接呼叫 ApiService，程式碼更簡潔
+      final Uint8List? resultBytes = await ApiService.embedWatermark(
+        _selectedFile!, 
+        _watermarkController.text
+      );
 
-      // 設定字體路徑 (若有)
-      String fontOption = fontPath != null ? "fontfile='$fontPath':" : "";
-      
-      // FFmpeg 濾鏡指令：右下角浮水印
-      // fontsize=64, 白色 80% 透明度
-      String filter = "drawtext=${fontOption}text='$text':fontsize=64:fontcolor=white@0.8:x=w-text_w-20:y=h-text_h-20";
-
-      // 組合指令
-      String cmd = "-i '${_selectedFile!.path}' -vf \"$filter\" ${_isVideo ? '-c:a aac' : ''} -y '$outputPath'";
-
-      debugPrint("執行 FFmpeg: $cmd");
-
-      await FFmpegKit.execute(cmd).then((session) async {
-        final returnCode = await session.getReturnCode();
+      if (resultBytes != null) {
+        // 存檔流程
+        final Directory tempDir = await getTemporaryDirectory();
+        final String ext = _isVideo ? "mp4" : "jpg";
+        final String outputPath = "${tempDir.path}/watermarked_${DateTime.now().millisecondsSinceEpoch}.$ext";
         
-        if (ReturnCode.isSuccess(returnCode)) {
-          // 成功後存入相簿
-          try {
-            if (_isVideo) {
-              await Gal.putVideo(outputPath);
-            } else {
-              await Gal.putImage(outputPath);
-            }
-            _showSnackbar("成功！已儲存到相簿 🎉", Colors.green);
-          } catch (e) {
-            debugPrint("Gal Error: $e");
-            if (e.toString().contains("ACCESS_DENIED")) {
-               _showSnackbar("儲存失敗：請允許相簿存取權限", Colors.red);
-            } else {
-               _showSnackbar("儲存到相簿失敗: $e", Colors.red);
-            }
-          }
+        final File outputFile = File(outputPath);
+        await outputFile.writeAsBytes(resultBytes);
+
+        // 存入相簿
+        if (_isVideo) {
+          await Gal.putVideo(outputPath);
         } else {
-          final logs = await session.getAllLogsAsString();
-          debugPrint("FFmpeg Error: $logs");
-          _showSnackbar("處理失敗，請檢查 Console Log", Colors.red);
+          await Gal.putImage(outputPath);
         }
-      });
+        
+        _showSnackbar("成功！隱形浮水印已嵌入並存入相簿 ✅", Colors.green);
+      } else {
+        _showSnackbar("製作失敗，請檢查伺服器狀態", Colors.red);
+      }
     } catch (e) {
       _showSnackbar("發生錯誤: $e", Colors.red);
     } finally {
@@ -180,24 +145,14 @@ class _WatermarkCreatePageState extends State<WatermarkCreatePage> with Automati
     }
   }
 
-  // 選取媒體 (支援相機與相簿)
+  // 選取媒體 (支援 Video 與 Image)
   Future<void> _pickMedia(ImageSource source, {bool isVideo = false}) async {
     try {
       final XFile? picked;
-      
       if (isVideo) {
-        // 舊版語法：直接呼叫 pickVideo
-        picked = await _picker.pickVideo(
-          source: source, 
-          maxDuration: const Duration(minutes: 10)
-        );
+        picked = await _picker.pickVideo(source: source, maxDuration: const Duration(minutes: 5));
       } else {
-        // 舊版語法：直接呼叫 pickImage
-        picked = await _picker.pickImage(
-          source: source, 
-          maxWidth: 1920, 
-          maxHeight: 1920
-        );
+        picked = await _picker.pickImage(source: source);
       }
 
       if (picked != null) {
@@ -226,7 +181,6 @@ class _WatermarkCreatePageState extends State<WatermarkCreatePage> with Automati
     if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: color));
   }
 
-  // 底部選單
   void _showMediaOptions() {
     showModalBottomSheet(
       context: context,
@@ -235,25 +189,23 @@ class _WatermarkCreatePageState extends State<WatermarkCreatePage> with Automati
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              leading: const Icon(Icons.photo_library, color: Colors.deepPurple),
-              title: const Text("從相簿選圖片"),
+              leading: const Icon(Icons.photo, color: Colors.deepPurple),
+              title: const Text("選擇圖片"),
               onTap: () { Navigator.pop(context); _pickMedia(ImageSource.gallery, isVideo: false); }
             ),
             ListTile(
-              leading: const Icon(Icons.camera_alt, color: Colors.deepPurple),
-              title: const Text("拍照"),
-              onTap: () { Navigator.pop(context); _pickMedia(ImageSource.camera, isVideo: false); }
-            ),
-            const Divider(),
-            ListTile(
-              leading: const Icon(Icons.video_library, color: Colors.deepPurple),
-              title: const Text("從相簿選影片"),
+              leading: const Icon(Icons.movie, color: Colors.deepPurple),
+              title: const Text("選擇影片"),
               onTap: () { Navigator.pop(context); _pickMedia(ImageSource.gallery, isVideo: true); }
             ),
             ListTile(
-              leading: const Icon(Icons.videocam, color: Colors.deepPurple),
-              title: const Text("錄影"),
-              onTap: () { Navigator.pop(context); _pickMedia(ImageSource.camera, isVideo: true); }
+              leading: const Icon(Icons.camera_alt, color: Colors.deepPurple),
+              title: const Text("拍攝"),
+              onTap: () { 
+                Navigator.pop(context); 
+                // 這裡簡化為拍照，若要錄影需額外處理
+                _pickMedia(ImageSource.camera, isVideo: false); 
+              }
             ),
           ],
         ),
@@ -268,7 +220,6 @@ class _WatermarkCreatePageState extends State<WatermarkCreatePage> with Automati
       padding: const EdgeInsets.all(20),
       child: Column(
         children: [
-           // 預覽區
            GestureDetector(
              onTap: _showMediaOptions,
              child: Container(
@@ -283,35 +234,34 @@ class _WatermarkCreatePageState extends State<WatermarkCreatePage> with Automati
                  ? const Column(mainAxisAlignment: MainAxisAlignment.center, children: [
                      Icon(Icons.add_a_photo, size: 40, color: Colors.grey), 
                      SizedBox(height: 10), 
-                     Text("點擊選擇或拍攝", style: TextStyle(color: Colors.grey))
+                     Text("點擊選擇媒體", style: TextStyle(color: Colors.grey))
                    ])
-                 : _isVideo 
-                      ? AspectRatio(aspectRatio: _videoController?.value.aspectRatio ?? 16/9, child: VideoPlayer(_videoController!))
+                 : _isVideo && _videoController != null && _videoController!.value.isInitialized
+                      ? AspectRatio(aspectRatio: _videoController!.value.aspectRatio, child: VideoPlayer(_videoController!))
                       : Image.file(_selectedFile!, fit: BoxFit.contain),
              ),
            ),
            const SizedBox(height: 20),
-           // 輸入框
            TextField(
              controller: _watermarkController,
              decoration: const InputDecoration(
-               labelText: "浮水印文字", 
-               prefixIcon: Icon(Icons.text_fields),
+               labelText: "浮水印內容 (Secret Key)", 
+               helperText: "這段文字將會隱形寫入檔案中",
+               prefixIcon: Icon(Icons.security),
                border: OutlineInputBorder()
              ),
            ),
            const SizedBox(height: 20),
-           // 按鈕
            SizedBox(
              width: double.infinity,
              height: 50,
              child: ElevatedButton.icon(
-               onPressed: _isLoading ? null : _processMedia,
+               onPressed: _isLoading ? null : _processMediaApi,
                style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurple, foregroundColor: Colors.white),
-               icon: _isLoading ? const SizedBox.shrink() : const Icon(Icons.save_alt),
+               icon: _isLoading ? const SizedBox.shrink() : const Icon(Icons.cloud_upload),
                label: _isLoading 
                  ? const CircularProgressIndicator(color: Colors.white)
-                 : const Text("加入浮水印並儲存"),
+                 : const Text("生成隱形浮水印"),
              ),
            )
         ],
@@ -320,10 +270,231 @@ class _WatermarkCreatePageState extends State<WatermarkCreatePage> with Automati
   }
 }
 
-class WatermarkVerifyPage extends StatelessWidget {
+// =============================================================================
+// 分頁 2: 驗證浮水印 (升級版)
+// =============================================================================
+class WatermarkVerifyPage extends StatefulWidget {
   const WatermarkVerifyPage({super.key});
   @override
+  State<WatermarkVerifyPage> createState() => _WatermarkVerifyPageState();
+}
+
+class _WatermarkVerifyPageState extends State<WatermarkVerifyPage> {
+  File? _selectedFile;
+  bool _isVideo = false;
+  VideoPlayerController? _videoController;
+
+  final TextEditingController _textController = TextEditingController();
+  
+  // 狀態顯示變數
+  String _statusTitle = "等待驗證";
+  String _statusDetail = "請上傳檔案以分析隱形浮水印";
+  Color _statusColor = Colors.grey;
+  bool _isLoading = false;
+
+  @override
+  void dispose() {
+    _videoController?.dispose();
+    _textController.dispose();
+    super.dispose();
+  }
+
+  // 修改重點 2: 這裡也要支援影片選擇
+  Future<void> _pickMedia(bool isVideo) async {
+    final picker = ImagePicker();
+    final XFile? picked = isVideo 
+        ? await picker.pickVideo(source: ImageSource.gallery)
+        : await picker.pickImage(source: ImageSource.gallery);
+
+    if (picked != null) {
+      _videoController?.dispose();
+      _videoController = null;
+      File file = File(picked.path);
+
+      if (isVideo) {
+        _videoController = VideoPlayerController.file(file);
+        await _videoController!.initialize();
+        _videoController!.setLooping(true);
+        _videoController!.play();
+      }
+
+      setState(() {
+        _selectedFile = file;
+        _isVideo = isVideo;
+        _statusTitle = "檔案就緒";
+        _statusDetail = "請點擊按鈕開始分析";
+        _statusColor = Colors.blue;
+      });
+    }
+  }
+
+  // 修改重點 3: 驗證邏輯改變 (後端提取 -> 前端比對)
+  // 修改後：使用 ApiService
+  Future<void> _verifyWatermark() async {
+    if (_selectedFile == null) return;
+    String expectedId = _textController.text.trim();
+    
+    setState(() {
+      _isLoading = true;
+      _statusTitle = "分析中...";
+      _statusDetail = "正在進行 DCT 頻率域解碼...";
+    });
+
+    try {
+      // 呼叫 API
+      final Map<String, dynamic> result = await ApiService.verifyWatermark(_selectedFile!);
+      
+      if (result['status'] == 'success') {
+        String extractedText = result['watermark_text'];
+        
+        // 前端比對邏輯
+        if (expectedId.isEmpty) {
+           _updateStatus("讀取成功", "發現浮水印內容: $extractedText", Colors.blue);
+        } else {
+           if (extractedText == expectedId) {
+             _updateStatus("驗證成功 ✅", "提取內容 '$extractedText' 與您的金鑰相符！", Colors.green);
+           } else {
+             _updateStatus("驗證失敗 ❌", "提取內容為 '$extractedText'，與金鑰不符。", Colors.red);
+           }
+        }
+      } else {
+        // status == 'failure' 或 'error'
+        _updateStatus("未發現浮水印", result['message'] ?? "未知錯誤", Colors.orange);
+      }
+    } catch (e) {
+      _updateStatus("程式錯誤", e.toString(), Colors.red);
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _updateStatus(String title, String detail, Color color) {
+    setState(() {
+      _statusTitle = title;
+      _statusDetail = detail;
+      _statusColor = color;
+    });
+  }
+
+  void _showOptions() {
+     showModalBottomSheet(
+      context: context,
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.image),
+              title: const Text("驗證圖片"),
+              onTap: () { Navigator.pop(context); _pickMedia(false); }
+            ),
+            ListTile(
+              leading: const Icon(Icons.movie),
+              title: const Text("驗證影片"),
+              onTap: () { Navigator.pop(context); _pickMedia(true); }
+            ),
+          ],
+        ),
+      )
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return const Center(child: Text("驗證功能開發中..."));
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        children: [
+            // 預覽區
+            GestureDetector(
+              onTap: _showOptions,
+              child: Container(
+                height: 200,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: _statusColor, width: 2)
+                ),
+                alignment: Alignment.center,
+                child: _selectedFile == null
+                    ? const Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                        Icon(Icons.upload_file, size: 40, color: Colors.grey),
+                        Text("點擊上傳檔案", style: TextStyle(color: Colors.grey))
+                      ])
+                    : _isVideo && _videoController != null && _videoController!.value.isInitialized
+                      ? AspectRatio(aspectRatio: _videoController!.value.aspectRatio, child: VideoPlayer(_videoController!))
+                      : Image.file(_selectedFile!, fit: BoxFit.contain),
+              ),
+            ),
+            
+            const SizedBox(height: 30),
+            
+            TextField(
+              controller: _textController,
+              decoration: const InputDecoration(
+                labelText: "輸入金鑰進行比對 (可選)",
+                hintText: "若留空則直接顯示讀取結果",
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.vpn_key),
+              ),
+            ),
+            
+            const SizedBox(height: 20),
+            
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo),
+                onPressed: _isLoading ? null : _verifyWatermark,
+                child: _isLoading 
+                  ? const CircularProgressIndicator(color: Colors.white)
+                  : const Text("開始 DCT 分析驗證", style: TextStyle(fontSize: 18, color: Colors.white)),
+              ),
+            ),
+            
+            const SizedBox(height: 30),
+            
+            // 結果卡片
+            Container(
+              padding: const EdgeInsets.all(16.0),
+              decoration: BoxDecoration(
+                color: _statusColor.withOpacity(0.1),
+                border: Border.all(color: _statusColor),
+                borderRadius: BorderRadius.circular(10)
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        _statusColor == Colors.green ? Icons.check_circle : 
+                        _statusColor == Colors.red ? Icons.cancel : Icons.info,
+                        color: _statusColor,
+                        size: 30,
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        _statusTitle,
+                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _statusColor),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    _statusDetail,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 14),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }
