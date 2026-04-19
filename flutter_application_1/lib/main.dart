@@ -1,5 +1,4 @@
 ﻿import 'dart:io';
-import 'dart:convert'; // 新增: 用於 JSON 解析
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -12,7 +11,6 @@ import 'package:ffmpeg_kit_flutter/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter/return_code.dart';
 import 'package:gal/gal.dart';
 import 'api_service.dart';
-import 'package:http/http.dart' as http;
 
 void main() {
   runApp(const WatermarkApp());
@@ -190,21 +188,31 @@ class _WatermarkCreatePageState extends State<WatermarkCreatePage> with Automati
           children: [
             ListTile(
               leading: const Icon(Icons.photo, color: Colors.deepPurple),
-              title: const Text("選擇圖片"),
+              title: const Text("從相簿選擇圖片"),
               onTap: () { Navigator.pop(context); _pickMedia(ImageSource.gallery, isVideo: false); }
             ),
             ListTile(
               leading: const Icon(Icons.movie, color: Colors.deepPurple),
-              title: const Text("選擇影片"),
+              title: const Text("從相簿選擇影片"),
               onTap: () { Navigator.pop(context); _pickMedia(ImageSource.gallery, isVideo: true); }
             ),
+            const Divider(), // 加個分隔線區分相簿與相機
             ListTile(
               leading: const Icon(Icons.camera_alt, color: Colors.deepPurple),
-              title: const Text("拍攝"),
+              title: const Text("拍照"),
               onTap: () { 
                 Navigator.pop(context); 
-                // 這裡簡化為拍照，若要錄影需額外處理
+                // 啟動相機拍照
                 _pickMedia(ImageSource.camera, isVideo: false); 
+              }
+            ),
+            ListTile(
+              leading: const Icon(Icons.videocam, color: Colors.deepPurple), // 使用錄影圖示
+              title: const Text("錄製影片"),
+              onTap: () { 
+                Navigator.pop(context); 
+                // 啟動相機錄影，並設定 isVideo 為 true
+                _pickMedia(ImageSource.camera, isVideo: true); 
               }
             ),
           ],
@@ -271,7 +279,7 @@ class _WatermarkCreatePageState extends State<WatermarkCreatePage> with Automati
 }
 
 // =============================================================================
-// 分頁 2: 驗證浮水印 (升級版)
+// 分頁 2: 驗證浮水印 
 // =============================================================================
 class WatermarkVerifyPage extends StatefulWidget {
   const WatermarkVerifyPage({super.key});

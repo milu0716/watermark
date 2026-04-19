@@ -1,4 +1,4 @@
-﻿from fastapi import FastAPI, UploadFile, File, Form
+﻿from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
 import numpy as np
 import cv2
@@ -6,8 +6,11 @@ import os
 import shutil
 from collections import Counter
 import uuid
-import re  # [新增] 引入正規表達式套件
+import re  
 
+def remove_file(path: str):
+    if os.path.exists(path):
+        os.remove(path)
 # ==========================================
 # 核心演算法: Robust DCT + Regex Filter
 # ==========================================
@@ -110,7 +113,6 @@ class DctRobustWatermark:
         if img is None: return None
         h, w = img.shape[:2]
         
-        # 只取左上角分析
         scan_h = min(h, 1024)
         scan_w = min(w, 1024)
         img_scan = img[:scan_h, :scan_w]
@@ -121,10 +123,8 @@ class DctRobustWatermark:
         candidates = []
 
         if allow_shift:
-            # 圖片模式：搜尋範圍稍微加大，確保抓到對齊
             search_range = range(8) 
         else:
-            # 影片模式：極速
             search_range = range(1)
 
         for dy in search_range:
@@ -134,21 +134,13 @@ class DctRobustWatermark:
                 shifted_img_y = img_y[dy:, dx:]
                 raw_text = self._extract_one_pass(shifted_img_y)
                 
-                # [核心修正] 使用 Regex 進行智慧提取
-                # 只要 raw_text 裡面包含 "MyWM:"，我們就啟動正則搜尋
                 if self.header in raw_text:
-                    
-                    # 策略 1: 完美匹配 (找 MyWM:...:::)
-                    # (.*?) 代表非貪婪匹配，找到最近的 ::: 就停
                     pattern_strict = r"MyWM:(.*?):::"
                     matches = re.findall(pattern_strict, raw_text)
                     for m in matches:
-                        if len(m) > 0 and len(m) < 50: # 合理長度檢查
+                        if len(m) > 0 and len(m) < 50:
                             candidates.append(m)
-                    
-                    # 策略 2: 保底匹配 (找 MyWM: 後面跟著的一串英數字)
-                    # [a-zA-Z0-9_\-\.]+ 代表只允許 英數、底線、減號、點
-                    # 一旦遇到 & @ * 這種亂碼，就會自動停止
+                
                     pattern_loose = r"MyWM:([a-zA-Z0-9_\-\.]+)"
                     matches_loose = re.findall(pattern_loose, raw_text)
                     for m in matches_loose:
@@ -242,13 +234,13 @@ def safe_read_image(path):
 # FastAPI Router
 # ==========================================
 app = FastAPI()
-watermarker = DctRobustWatermark(alpha=40.0)
+watermarker = DctRobustWatermark(alpha=60.0)
 
 @app.post("/verify")
-async def verify_watermark(file: UploadFile = File(...)):
+async def verify_watermark(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
     filename = file.filename
     ext = os.path.splitext(filename)[1].lower()
-    is_video = ext in ['.mp4', '.avi', '.mov']
+    is_video = ext in ['.mp4', '.avi', '.mov', '.mkv', '.mpeg', '.mpg', '.3gp']
     
     try:
         if is_video:
@@ -257,7 +249,14 @@ async def verify_watermark(file: UploadFile = File(...)):
                 shutil.copyfileobj(file.file, buffer)
             
             extracted_text = process_video_verify(temp_input, watermarker)
-            if os.path.exists(temp_input): os.remove(temp_input)
+
+            # [修正] 改用背景任務刪除暫存檔，避免檔案還在佔用時出錯
+            if background_tasks:
+                background_tasks.add_task(remove_file, temp_input)
+            elif os.path.exists(temp_input): 
+                try: os.remove(temp_input)
+                except: pass
+
 
         else:
             contents = await file.read()
@@ -285,23 +284,51 @@ async def verify_watermark(file: UploadFile = File(...)):
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
 @app.post("/embed")
-async def embed_watermark(file: UploadFile = File(...), text: str = Form(...)):
-    ext = os.path.splitext(file.filename)[1].lower()
-    is_video = ext in ['.mp4', '.avi', '.mov']
+async def embed_watermark(file: UploadFile = File(...), text: str = Form(...), background_tasks: BackgroundTasks = None):
+    # 1. 取得副檔名並判斷格式
+    filename = file.filename # 先定義好 filename 變數
+    ext = os.path.splitext(filename)[1].lower()
+    
+    # 記得把 .mpeg, .mpg 加進去
+    is_video = ext in ['.mp4', '.avi', '.mov', '.mkv', '.mpeg', '.mpg', '.3gp']
     
     unique_name = str(uuid.uuid4())
     temp_input = f"temp_in_{unique_name}{ext}"
-    temp_output = f"temp_out_{unique_name}{ext}" if is_video else f"temp_out_{unique_name}.jpg"
+    
+    # ================= 修改重點 1: 強制輸出檔名 =================
+    # 不管來源是什麼，輸出暫存檔名強制用 .mp4
+    if is_video:
+        temp_output = f"temp_out_{unique_name}.mp4"
+    else:
+        temp_output = f"temp_out_{unique_name}.jpg"
+    # ==========================================================
 
-    with open(temp_input, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    # ================= 修改重點 2: 安全讀取檔案 (避免 0kb) =================
+    print(f"📥 開始接收檔案: {filename}")
+    content = await file.read() # 使用 await read 比較穩
+    
+    if len(content) == 0:
+        return JSONResponse(content={"status": "error", "message": "Empty file received"}, status_code=400)
+
+    with open(temp_input, "wb") as f:
+        f.write(content)
+    # ====================================================================
         
     try:
         if is_video:
+            print("🎬 偵測為影片，開始處理...")
+            # 注意：這裡會呼叫 process_video_embed，請確認你那邊的 fourcc 已經改成 'mp4v' 了
             success = process_video_embed(temp_input, temp_output, text, watermarker)
             media_type = "video/mp4"
-            out_filename = f"watermarked_{file.filename}"
+            
+            # ================= 修改重點 3: 回傳給使用者的檔名 =================
+            # 把原本檔名的副檔名拿掉，強制加上 .mp4
+            original_name_no_ext = os.path.splitext(filename)[0]
+            out_filename = f"watermarked_{original_name_no_ext}.mp4"
+            # ============================================================
+            
         else:
+            print("🖼️ 偵測為圖片，開始讀取...")
             img = safe_read_image(temp_input)
             if img is None:
                 return JSONResponse(content={"status": "error", "message": "Failed to read image"}, status_code=400)
@@ -314,14 +341,22 @@ async def embed_watermark(file: UploadFile = File(...), text: str = Form(...)):
                     f.write(buffer)
             success = True
             media_type = "image/jpeg"
-            out_filename = f"watermarked_{os.path.splitext(file.filename)[0]}.jpg"
+            out_filename = f"watermarked_{os.path.splitext(filename)[0]}.jpg"
 
         if not success:
             return JSONResponse(content={"status": "error", "message": "Processing failed"}, status_code=500)
 
+        # 安排背景任務刪除暫存檔
+        if background_tasks:
+            background_tasks.add_task(remove_file, temp_input)
+            background_tasks.add_task(remove_file, temp_output)
+
+        print(f"🚀 處理完成，回傳檔案: {out_filename}")
         return FileResponse(temp_output, media_type=media_type, filename=out_filename)
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
 if __name__ == "__main__":

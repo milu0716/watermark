@@ -38,4 +38,4 @@ def run_compression_test(image_path, text_to_embed):
 
 if __name__ == "__main__":
     # 請換成你電腦裡隨便一張照片的路徑
-    run_compression_test("test1.jpg", "Hello1234")
+    run_compression_test("ny.jpg", "Hello1234")

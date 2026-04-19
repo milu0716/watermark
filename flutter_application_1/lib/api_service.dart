@@ -1,6 +1,5 @@
 ﻿import 'dart:io';
 import 'dart:convert';
-import 'dart:typed_data'; // 用於處理二進位圖片/影片流
 import 'package:http/http.dart' as http;
 import 'package:flutter/foundation.dart';
 
@@ -56,7 +55,12 @@ class ApiService {
         // 成功：讀取回傳的二進位流 (圖片或影片檔)
         return await response.stream.toBytes();
       } else {
-        debugPrint('Embed Failed: ${response.statusCode}');
+        // ============ 修改這裡 ============
+        // 把錯誤訊息讀出來並印在終端機
+        var errorBody = await response.stream.bytesToString();
+        debugPrint('❌ Embed Failed: ${response.statusCode}');
+        debugPrint('❌ Server Error Message: $errorBody'); 
+        // ================================
         return null;
       }
     } catch (e) {
