@@ -101,7 +101,8 @@ class _WatermarkCreatePageState extends State<WatermarkCreatePage> with Automati
     _watermarkController.dispose();
     super.dispose();
   }
-
+  
+  
   // 修改重點 1: 改用 API 上傳，而非本地 FFmpeg
   // 修改後：使用 ApiService
   Future<void> _processMediaApi() async {
@@ -110,29 +111,56 @@ class _WatermarkCreatePageState extends State<WatermarkCreatePage> with Automati
     setState(() => _isLoading = true);
 
     try {
+      File fileToUpload = _selectedFile!; // 預設使用原本選取的檔案
+
+      
+      _showSnackbar("正在上傳並嵌入浮水印，請稍候...", Colors.blue);
       // 直接呼叫 ApiService，程式碼更簡潔
       final Uint8List? resultBytes = await ApiService.embedWatermark(
-        _selectedFile!, 
+        fileToUpload, 
         _watermarkController.text
       );
 
       if (resultBytes != null) {
         // 存檔流程
         final Directory tempDir = await getTemporaryDirectory();
-        final String ext = _isVideo ? "mp4" : "jpg";
-        final String outputPath = "${tempDir.path}/watermarked_${DateTime.now().millisecondsSinceEpoch}.$ext";
-        
-        final File outputFile = File(outputPath);
-        await outputFile.writeAsBytes(resultBytes);
-
-        // 存入相簿
         if (_isVideo) {
-          await Gal.putVideo(outputPath);
+          _showSnackbar("正在手機端合併音軌與轉碼，請稍候...", Colors.orange);
+          
+          // 1. 存下後端傳回的無聲影片
+          final String mutedPath = "${tempDir.path}/muted_${DateTime.now().millisecondsSinceEpoch}.mp4";
+          final File mutedFile = File(mutedPath);
+          await mutedFile.writeAsBytes(resultBytes);
+
+          // 2. 準備最終輸出路徑
+          final String finalOutputPath = "${tempDir.path}/final_watermarked_${DateTime.now().millisecondsSinceEpoch}.mp4";
+
+          // 3. 執行 FFmpeg 縫合畫面與聲音
+          // 將 -c:a copy 改成 -c:a aac，並加上 -b:a 128k 確保音質
+          final String mergeCommand = '-y -i "$mutedPath" -i "${_selectedFile!.path}" -map 0:v:0 -map 1:a:0? -c:v libx264 -preset fast -c:a aac -b:a 128k "$finalOutputPath"';
+          
+          debugPrint("🎬 開始前端音軌縫合...");
+          final session = await FFmpegKit.execute(mergeCommand);
+          final returnCode = await session.getReturnCode();
+
+          if (ReturnCode.isSuccess(returnCode)) {
+            await Gal.putVideo(finalOutputPath);
+            _showSnackbar("成功！隱形浮水印影片已存入相簿 ✅", Colors.green);
+          } else {
+            final logs = await session.getLogsAsString();
+            debugPrint("❌ FFmpeg 縫合失敗: $logs");
+            _showSnackbar("音軌縫合失敗，請查看終端機日誌", Colors.red);
+          }
+
         } else {
+          // 圖片邏輯保持不變
+          final String outputPath = "${tempDir.path}/watermarked_${DateTime.now().millisecondsSinceEpoch}.jpg";
+          final File outputFile = File(outputPath);
+          await outputFile.writeAsBytes(resultBytes);
           await Gal.putImage(outputPath);
+          _showSnackbar("成功！隱形浮水印圖片已存入相簿 ✅", Colors.green);
         }
-        
-        _showSnackbar("成功！隱形浮水印已嵌入並存入相簿 ✅", Colors.green);
+
       } else {
         _showSnackbar("製作失敗，請檢查伺服器狀態", Colors.red);
       }
