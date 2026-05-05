@@ -13,7 +13,7 @@ def remove_file(path: str):
         os.remove(path)
 
 # ==========================================
-# 核心一：希爾伯特曲線轉換與鏡像填充
+# 核心一：希爾伯特曲線轉換 (移除邊界鏡像依賴)
 # ==========================================
 class HilbertTransform:
     @staticmethod
@@ -34,69 +34,92 @@ class HilbertTransform:
             s *= 2
         return x, y
 
-    @staticmethod
-    def mirror_coord(val, max_val):
-        if val < 0:
-            return -val
-        if val >= max_val:
-            period = 2 * (max_val - 1)
-            if period <= 0: return 0
-            val = val % period
-            if val >= max_val:
-                val = period - val
-        return val
-
 # ==========================================
-# 核心二：顯著性偵測與幾何質心
+# 核心二：ORB 特徵點與 ROI 邊界框擷取
 # ==========================================
-def get_geometric_centroid(img):
+def get_orb_boxes(img, box_size=128, top_n=5, min_dist=128):
     """
-    計算質心，並【強制對齊 8 的倍數】，避免 JPEG/MP4 壓縮網格破壞 DCT 頻域。
+    尋找圖片中最強的 ORB 特徵點，並回傳這些點對應的 ROI 框框左上角座標。
+    加入 min_dist 參數，確保特徵點彼此分散，提高抗裁切能力。
     """
-    try:
-        saliency = cv2.saliency.StaticSaliencySpectralResidual_create()
-        success, saliencyMap = saliency.computeSaliency(img)
-        if success:
-            saliencyMap = (saliencyMap * 255).astype("uint8")
-            _, threshMap = cv2.threshold(saliencyMap, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-            
-            M = cv2.moments(threshMap)
-            if M["m00"] != 0:
-                cX = int(M["m10"] / M["m00"])
-                cY = int(M["m01"] / M["m00"])
-                # 【修改重點 1】強制對齊 8x8 網格
-                return (cX // 8) * 8, (cY // 8) * 8
-    except Exception as e:
-        print(f"Saliency error: {e}")
-        pass
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    # 預設回傳圖像正中央，同樣對齊 8 的倍數
-    return (img.shape[1] // 2 // 8) * 8, (img.shape[0] // 2 // 8) * 8
+    # 初始化 ORB (多找一點備用，避免距離過濾後數量不夠)
+    orb = cv2.ORB_create(nfeatures=1000)
+    keypoints, _ = orb.detectAndCompute(gray, None)
+    
+    # 預設回傳圖片正中央 (當作防呆備案)
+    fallback_box = [(max(0, w//2 - box_size//2), max(0, h//2 - box_size//2))]
+    
+    if not keypoints:
+        print("⚠️ 無法找到 ORB 特徵點，使用畫面中央作為備案。")
+        return fallback_box
 
+    # 依照特徵點強度 (response) 排序，取最強的點
+    keypoints = sorted(keypoints, key=lambda x: x.response, reverse=True)
+    
+    boxes = []
+    # 記錄已選取的中心點，用來計算距離
+    selected_centers = [] 
+    half_box = box_size // 2
+    
+    for kp in keypoints:
+        kx, ky = int(kp.pt[0]), int(kp.pt[1])
+        start_x, start_y = kx - half_box, ky - half_box
+        
+        # 1. 確保框框不會超出圖片邊界
+        if start_x >= 0 and start_y >= 0 and (start_x + box_size) <= w and (start_y + box_size) <= h:
+            
+            # 2. 確保特徵點彼此保持安全距離 (分散邏輯)
+            too_close = False
+            for cx, cy in selected_centers:
+                # 計算與已選中點的直線距離 (歐式距離)
+                if ((kx - cx)**2 + (ky - cy)**2)**0.5 < min_dist:
+                    too_close = True
+                    break
+            
+            if not too_close:
+                boxes.append((start_x, start_y))
+                selected_centers.append((kx, ky))
+                if len(boxes) >= top_n:
+                    break
+                
+    if not boxes:
+        print("⚠️ ORB 特徵點太靠近邊緣或無法分散，使用畫面中央作為備案。")
+        return fallback_box
+        
+    return boxes
 
 # ==========================================
-# 升級版的演算法: 基於質心與希爾伯特曲線的 Robust DCT
+# 升級版演算法: ORB + 局部希爾伯特曲線 DCT 浮水印
 # ==========================================
 class DctRobustWatermark:
-    def __init__(self, alpha=40.0):
+    def __init__(self, alpha=60.0):
         self.block_size = 8
         self.pos1 = (2, 1)
         self.pos2 = (1, 2)
         self.alpha = alpha
-        self.header = "MyWM:"   
-        self.footer = ":::EOF"  
         
-        self.hilbert_grid_size = 32 
-        self.max_bits = self.hilbert_grid_size * self.hilbert_grid_size
+        # 縮短 Header/Footer 節省位元空間
+        self.header = "W["   
+        self.footer = "]E"  
+        
+        # 定義局部的浮水印小宇宙 (128x128 像素)
+        self.hilbert_grid_size = 16 
+        self.box_size = self.hilbert_grid_size * self.block_size 
+        self.max_bits = self.hilbert_grid_size * self.hilbert_grid_size # 256 bits
+        
+        # 預先計算相對座標路徑 (不受外在圖片大小影響)
+        self.local_path = self._generate_local_path()
 
     def text_to_bits(self, text):
         full_text = self.header + text + self.footer
         max_chars = self.max_bits // 8
         repeat_count = max_chars // len(full_text)
-        if repeat_count == 0: 
-            repeat_count = 1
+        if repeat_count == 0: repeat_count = 1
             
-        repeated_text = full_text * repeat_count
+        repeated_text = (full_text * repeat_count)[:max_chars]
         
         bits = []
         for char in repeated_text:
@@ -113,119 +136,109 @@ class DctRobustWatermark:
         for i in range(0, len(bits), 8):
             byte = bits[i:i+8]
             if len(byte) < 8: break
-            byte_str = ''.join(str(b) for b in byte)
             try:
-                char_code = int(byte_str, 2)
+                char_code = int(''.join(str(b) for b in byte), 2)
                 if 32 <= char_code <= 126: chars.append(chr(char_code))
                 else: chars.append('')
             except: pass
         return ''.join(chars)
 
-    def generate_embedding_path(self, cX, cY, max_w, max_h):
+    def _generate_local_path(self):
         path = []
         n = self.hilbert_grid_size
-        
-        offset_x = cX - (n * self.block_size // 2)
-        offset_y = cY - (n * self.block_size // 2)
-
         for d in range(self.max_bits):
             hx, hy = HilbertTransform.d2xy(n, d)
-            
-            px = offset_x + hx * self.block_size
-            py = offset_y + hy * self.block_size
-            
-            px = HilbertTransform.mirror_coord(px, max_w - self.block_size)
-            py = HilbertTransform.mirror_coord(py, max_h - self.block_size)
-            
+            py = hy * self.block_size
+            px = hx * self.block_size
             path.append((py, px)) 
         return path
 
+    def _process_box(self, box_y, bits=None, mode='embed'):
+        """處理單一 128x128 區塊的寫入或讀取"""
+        extracted_bits = []
+        for idx, (i, j) in enumerate(self.local_path):
+            block = box_y[i:i+8, j:j+8]
+            dct_block = cv2.dct(block)
+            
+            if mode == 'embed':
+                if idx >= len(bits): break
+                v1, v2 = dct_block[self.pos1], dct_block[self.pos2]
+                bit = bits[idx]
+                P = self.alpha
+                
+                if bit == 1:
+                    if v1 <= v2 + P:
+                        avg = (v1 + v2)/2
+                        dct_block[self.pos1] = avg + (P/2) + 2
+                        dct_block[self.pos2] = avg - (P/2) - 2
+                else:
+                    if v2 <= v1 + P:
+                        avg = (v1 + v2)/2
+                        dct_block[self.pos1] = avg - (P/2) - 2
+                        dct_block[self.pos2] = avg + (P/2) + 2
+                
+                box_y[i:i+8, j:j+8] = cv2.idct(dct_block)
+            else:
+                # Extract mode
+                extracted_bits.append(1 if dct_block[self.pos1] > dct_block[self.pos2] else 0)
+                
+        if mode == 'embed':
+            return box_y
+        return extracted_bits
+
     def embed_frame(self, img, secret_text):
         if img is None: return None
-        h, w = img.shape[:2]
         
-        cX, cY = get_geometric_centroid(img)
-        print(f"🟢 [Embed] 寫入時的質心座標: ({cX}, {cY})")
-
         img_yuv = cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
         img_y = img_yuv[:,:,0].astype(np.float32)
 
         bits = self.text_to_bits(secret_text)
-        path = self.generate_embedding_path(cX, cY, w, h)
         
-        for idx, (i, j) in enumerate(path):
-            block = img_y[i:i+8, j:j+8]
-            dct_block = cv2.dct(block)
-            v1 = dct_block[self.pos1]
-            v2 = dct_block[self.pos2]
-            bit = bits[idx]
-            
-            P = self.alpha
-            
-            # 【修改重點 2】拿掉 if dc > 240*8 判斷，確保 1:1 無條件寫入位元，防止萃取錯亂
-            if bit == 1:
-                if v1 <= v2 + P:
-                    avg = (v1 + v2)/2
-                    v1 = avg + (P/2) + 2
-                    v2 = avg - (P/2) - 2
-            else:
-                if v2 <= v1 + P:
-                    avg = (v1 + v2)/2
-                    v1 = avg - (P/2) - 2
-                    v2 = avg + (P/2) + 2
-            
-            dct_block[self.pos1] = v1
-            dct_block[self.pos2] = v2
-            img_y[i:i+8, j:j+8] = cv2.idct(dct_block)
+        # 取得最強的 5 個 ORB 特徵點周圍的 128x128 框框
+        target_boxes = get_orb_boxes(img, box_size=self.box_size, top_n=10)
+        print(f"🟢 [Embed] ORB 找到 {len(target_boxes)} 個寫入區域")
+
+        for (start_x, start_y) in target_boxes:
+            box_y = img_y[start_y:start_y+self.box_size, start_x:start_x+self.box_size]
+            img_y[start_y:start_y+self.box_size, start_x:start_x+self.box_size] = self._process_box(box_y, bits, mode='embed')
 
         img_yuv[:,:,0] = np.clip(img_y, 0, 255).astype(np.uint8)
-        img_out = cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
-        return img_out
+        return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
 
     def extract_frame(self, img):
         if img is None: return None
-        h, w = img.shape[:2]
         
         img_yuv = cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
         img_y = img_yuv[:,:,0].astype(np.float32)
         
         candidates = []
         
-        cX, cY = get_geometric_centroid(img)
-        print(f"🔴 [Verify] 讀取時的初始質心座標: ({cX}, {cY})")
+        # 讀取時，再度使用 ORB 找尋被裁切後圖片中倖存的特徵點
+        target_boxes = get_orb_boxes(img, box_size=self.box_size, top_n=15) # 讀取時可多找幾個點提高機率
+        print(f"🔴 [Verify] ORB 掃描了 {len(target_boxes)} 個可能的區域")
         
-        # 【修改重點 3】大幅縮小搜尋範圍，先用 -2 到 +2 驗證核心邏輯，防 FastAPI 超時
-        for dy in range(-8, 9):
-            for dx in range(-8, 9):
-                test_cX, test_cY = cX + dx, cY + dy
-                path = self.generate_embedding_path(test_cX, test_cY, w, h)
-                
-                all_bits = []
-                for (i, j) in path:
-                    if i + 8 > h or j + 8 > w or i < 0 or j < 0:
-                        all_bits.append(0)
+        pattern = re.escape(self.header) + r"(.*?)" + re.escape(self.footer)
+        
+        for (start_x, start_y) in target_boxes:
+            # 針對 ORB 找到的點，稍微做一點微調容錯 (+-4 像素)，防禦 DCT 網格偏移
+            for dy in range(-4, 5, 4):
+                for dx in range(-4, 5, 4):
+                    y, x = start_y + dy, start_x + dx
+                    if y < 0 or x < 0 or (y + self.box_size) > img.shape[0] or (x + self.box_size) > img.shape[1]:
                         continue
+                        
+                    box_y = img_y[y:y+self.box_size, x:x+self.box_size]
+                    all_bits = self._process_box(box_y, mode='extract')
+                    raw_text = self.bits_to_text_stream(all_bits)
 
-                    block = img_y[i:i+8, j:j+8]
-                    dct_block = cv2.dct(block)
-                    all_bits.append(1 if dct_block[self.pos1] > dct_block[self.pos2] else 0)
-                
-                raw_text = self.bits_to_text_stream(all_bits)
-
-                # 寬鬆或嚴謹的 Regex 擷取
-                if self.header in raw_text:
-                    pattern_strict = r"MyWM:(.*?):::"
-                    matches = re.findall(pattern_strict, raw_text)
+                    matches = re.findall(pattern, raw_text)
                     for m in matches:
-                        if 0 < len(m) < 50: candidates.append(m)
-                
-                    pattern_loose = r"MyWM:([a-zA-Z0-9_\-\.]+)"
-                    matches_loose = re.findall(pattern_loose, raw_text)
-                    for m in matches_loose:
-                        if 0 < len(m) < 50: candidates.append(m)
+                        if 0 < len(m) < 32 and m.isprintable(): 
+                            candidates.append(m)
 
         if not candidates:
             return None
+            
         return Counter(candidates).most_common(1)[0][0]
 
 # ==========================================
